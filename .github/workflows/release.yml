@@ -1,0 +1,128 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.15.1
+
+jobs:
+  tests:
+    name: Test before release
+    uses: ./.github/workflows/test.yml
+
+  release:
+    name: Build and release
+    needs: tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build all platform payloads
+        run: |
+          set -eu
+          mkdir -p dist
+          zig cc -target x86_64-windows-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-win-x64.exe src/*.c
+          zig cc -target x86-windows-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-win-x86.exe src/*.c
+          zig cc -target aarch64-windows-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-win-arm64.exe src/*.c
+          zig cc -target x86_64-linux-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-linux-x64 src/*.c
+          zig cc -target x86-linux-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-linux-x86 src/*.c
+          zig cc -target aarch64-linux-gnu -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-linux-arm64 src/*.c
+          zig cc -target x86_64-macos -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-macos-x64 src/*.c
+          zig cc -target aarch64-macos -std=c11 -O2 -Wall -Wextra \
+            -o dist/anybundle-macos-arm64 src/*.c
+
+          chmod +x dist/anybundle-linux-x64
+          tag_name_safe="${GITHUB_REF_NAME//\//-}"
+          dist/anybundle-linux-x64 build \
+            --name anybundle \
+            --version "$GITHUB_REF_NAME" \
+            --win-x64 "dist/anybundle-win-x64.exe" \
+            --win-x86 "dist/anybundle-win-x86.exe" \
+            --win-arm64 "dist/anybundle-win-arm64.exe" \
+            --linux-x64 "dist/anybundle-linux-x64" \
+            --linux-x86 "dist/anybundle-linux-x86" \
+            --linux-arm64 "dist/anybundle-linux-arm64" \
+            --macos-x64 "dist/anybundle-macos-x64" \
+            --macos-arm64 "dist/anybundle-macos-arm64" \
+            -o "dist/anybundle-${tag_name_safe}-any-platform.sh.ps1"
+
+      - name: Prepare release notes
+        id: notes
+        env:
+          TAG_REF: ${{ github.ref }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+
+          if [ "$(git cat-file -t "$TAG_REF")" = "tag" ]; then
+            git cat-file tag "$TAG_REF" > tag-object.txt
+          else
+            : > tag-object.txt
+          fi
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          raw = Path("tag-object.txt").read_text(encoding="utf-8")
+          message = raw.split("\n\n", 1)[1] if "\n\n" in raw else ""
+          lines = message.splitlines()
+          signature_start = next(
+              (index for index, line in enumerate(lines)
+               if line == "-----BEGIN PGP SIGNATURE-----"),
+              len(lines),
+          )
+          lines = lines[:signature_start]
+
+          first_line = lines[0].strip() if lines else ""
+          body_start = next(
+              (index for index, line in enumerate(lines[1:], start=1)
+               if line.strip()),
+              len(lines),
+          )
+          body = "\n".join(lines[body_start:]).rstrip()
+
+          Path("release-title.txt").write_text(
+              f"{os.environ['TAG_NAME']} - {first_line}\n",
+              encoding="utf-8",
+          )
+          Path("release-body.txt").write_text(body + "\n", encoding="utf-8")
+          PY
+
+          {
+            echo 'title<<RELEASE_TITLE'
+            cat release-title.txt
+            echo 'RELEASE_TITLE'
+            echo 'body<<RELEASE_BODY'
+            cat release-body.txt
+            echo 'RELEASE_BODY'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.notes.outputs.title }}
+          body: ${{ steps.notes.outputs.body }}
+          files: dist/*

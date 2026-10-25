@@ -1,0 +1,7 @@
+build/
+dist/
+*.o
+anybundle
+*.exe
+*.sh.ps1
+!templates/launcher.sh.ps1

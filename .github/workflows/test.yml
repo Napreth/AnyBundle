@@ -1,0 +1,94 @@
+name: Regression tests
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: ${{ matrix.os }} / ${{ matrix.runtime }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            shell: sh
+            runtime: sh
+          - os: ubuntu-latest
+            shell: bash
+            runtime: bash
+          - os: macos-latest
+            shell: sh
+            runtime: sh
+          - os: macos-latest
+            shell: bash
+            runtime: bash
+          - os: windows-latest
+            shell: powershell
+            runtime: powershell
+          - os: windows-latest
+            shell: powershell
+            runtime: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check generated launcher resource
+        run: python tools/embed_launcher.py --check
+      - uses: goto-bus-stop/setup-zig@v2
+        if: runner.os != 'macOS'
+        with:
+          version: 0.15.1
+      - name: Build native builder and test payload
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p build
+          if [ "$RUNNER_OS" = macOS ]; then
+            compiler=(xcrun --sdk macosx clang)
+          else
+            compiler=(zig cc)
+          fi
+          "${compiler[@]}" -std=c11 -O2 -Wall -Wextra -pedantic -Woverlength-strings -Werror -D_CRT_SECURE_NO_WARNINGS -o build/anybundle.exe src/*.c
+          "${compiler[@]}" -std=c11 -O2 -Wall -Wextra -Werror -o build/hello.exe examples/hello.c
+          if [ "$RUNNER_OS" = Linux ]; then
+            "${compiler[@]}" -std=c11 -Wall -Wextra -Werror -shared -fPIC -o build/io-faults.so tests/io_faults.c -ldl
+          fi
+      - name: Run bundle regression tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            export ANYBUNDLE_TEST_IO_FAULT_LIBRARY="$PWD/build/io-faults.so"
+          fi
+          python tests/regression.py --builder build/anybundle.exe --payload build/hello.exe \
+            --shell '${{ matrix.shell }}' --runtime '${{ matrix.runtime }}' -v
+
+  ubsan:
+    name: Linux / UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check generated launcher resource
+        run: python tools/embed_launcher.py --check
+      - name: Build with undefined behavior checks
+        run: |
+          mkdir -p build
+          cc -std=c11 -O1 -g -Wall -Wextra -pedantic -Woverlength-strings -Werror \
+            -fsanitize=undefined -fno-sanitize-recover=all -o build/anybundle src/*.c
+          cc -std=c11 -O2 -Wall -Wextra -Werror -o build/hello examples/hello.c
+          cc -std=c11 -Wall -Wextra -Werror -shared -fPIC -o build/io-faults.so tests/io_faults.c -ldl
+      - name: Run bundle regression tests
+        run: |
+          python tests/regression.py --builder build/anybundle --payload build/hello --shell sh --io-fault-library build/io-faults.so -v
